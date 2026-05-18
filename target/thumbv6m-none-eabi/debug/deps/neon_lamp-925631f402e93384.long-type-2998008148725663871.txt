@@ -1,0 +1,1 @@
+DfPlayer<Serial<stm32f0xx_hal::pac::USART1, stm32f0xx_hal::gpio::gpioa::PA9<Alternate<stm32f0xx_hal::gpio::AF1>>, stm32f0xx_hal::gpio::gpioa::PA10<Alternate<stm32f0xx_hal::gpio::AF1>>>>

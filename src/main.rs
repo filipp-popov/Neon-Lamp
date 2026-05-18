@@ -28,6 +28,7 @@ const DIAGNOSTIC_GPIO_TEST: bool = false;
 const DIAGNOSTIC_OFF_FRAME_TEST: bool = false;
 const DIAGNOSTIC_SCOPE_PATTERN_TEST: bool = false;
 const DIAGNOSTIC_DFPLAYER_TEST: bool = false;
+const DIAGNOSTIC_UART_PATTERN_TEST: bool = false;
 const DIAGNOSTIC_INVERT_WS_SIGNAL: bool = false;
 const HEARTBEAT_PIN: u8 = 4;
 const HEARTBEAT_TOGGLE_FRAMES: u8 = 64;
@@ -36,13 +37,16 @@ const GPIOA_BSRR: *mut u32 = 0x4800_0018 as *mut u32;
 const RELAY_PIN: u8 = 7;
 const TEST_BRIGHTNESS: u8 = 64;
 const DFPLAYER_TRACK_SECONDS: u8 = 20;
-const DFPLAYER_USE_MP3_FOLDER: bool = false;
+const DFPLAYER_USE_MP3_FOLDER: bool = true;
 const DFPLAYER_ENABLED: bool = true;
 const START_TRACK: u8 = 1;
 const FAILED_START_MIN_TRACK: u8 = 2;
 const FAILED_START_TRACKS: u8 = 3;
 const RUN_TRACK: u8 = 5;
 const SUCCESS_START_STEPS: u16 = 85;
+const RUN_TRACK_REPEAT_STEPS: u16 = 500;
+const FAILED_TRACK_MIN_STEPS: u16 = 360;
+const FAILED_TRACK_RANDOM_STEPS: u16 = 320;
 const STARTING_END_GLOW_PIXELS: usize = 6;
 const STARTING_RED_BASE_PIXELS: usize = 3;
 const STARTING_DISCHARGE_CYCLE_STEPS: u16 = 30;
@@ -50,12 +54,10 @@ const STARTING_FULL_FLASH_STEPS: u16 = 170;
 const STARTING_FULL_FLASH_DURATION_STEPS: u16 = 7;
 const STARTING_CENTER_DIM_PIXELS: usize = LED_COUNT * 30 / 100;
 const STARTING_DISCHARGE_DECAY_STEPS: u8 = 3;
-const DFPLAYER_WRITE_TIMEOUT: u16 = 1_000;
+const DFPLAYER_WRITE_TIMEOUT: u16 = 30_000;
 const DFPLAYER_BOOT_DELAY_STEPS: u16 = 80;
 const DFPLAYER_START_RETRY_STEPS: u16 = 80;
 const DFPLAYER_VOLUME: u8 = 24;
-const DFPLAYER_MP3_FOLDER: u8 = 1;
-const DFPLAYER_DIRECT_RETRY_STEPS: u16 = 45;
 
 type ModePin = PA0<Input<PullUp>>;
 type NoisePin = PA1<Input<PullUp>>;
@@ -206,27 +208,43 @@ where
         while attempts < DFPLAYER_WRITE_TIMEOUT {
             match self.tx.write(byte) {
                 Ok(()) => return,
-                Err(nb::Error::WouldBlock) => attempts = attempts.wrapping_add(1),
+                Err(nb::Error::WouldBlock) => {
+                    attempts = attempts.wrapping_add(1);
+                    cortex_m::asm::delay(80);
+                }
                 Err(nb::Error::Other(_)) => return,
             }
         }
+    }
+
+    fn write_uart_pattern(&mut self) {
+        self.write_byte_timeout(0x55);
+        self.write_byte_timeout(0x00);
+        self.write_byte_timeout(0xff);
     }
 
     fn play_track(&mut self, track: u8) {
         self.send_command(0x03, track as u16);
     }
 
-    fn next_track(&mut self) {
-        self.send_command(0x01, 0);
+    fn play_configured_track(&mut self, track: u8) {
+        if DFPLAYER_USE_MP3_FOLDER {
+            self.play_mp3_folder_track(track);
+        } else {
+            self.play_track(track);
+        }
     }
 
-    fn play_mp3_folder_track(&mut self, folder: u8, track: u8) {
-        let param = ((folder as u16) << 8) | (track as u16);
-        self.send_command(0x12, param);
+    fn play_mp3_folder_track(&mut self, track: u8) {
+        self.send_command(0x12, track as u16);
     }
 
     fn loop_track(&mut self, track: u8) {
         self.send_command(0x08, track as u16);
+    }
+
+    fn select_tf_card(&mut self) {
+        self.send_command(0x09, 2);
     }
 
     fn set_volume(&mut self, volume: u8) {
@@ -272,8 +290,6 @@ where
     audio_started: bool,
     audio_configured: bool,
     audio_stopped_after_boot: bool,
-    direct_audio_retry_steps: u16,
-    direct_audio_retry_next: bool,
     discharge_steps: u8,
     discharge_left_reach: u8,
     discharge_right_reach: u8,
@@ -314,8 +330,6 @@ where
             audio_started: false,
             audio_configured: false,
             audio_stopped_after_boot: false,
-            direct_audio_retry_steps: 0,
-            direct_audio_retry_next: false,
             discharge_steps: 0,
             discharge_left_reach: 0,
             discharge_right_reach: 0,
@@ -369,8 +383,6 @@ where
             self.pending_loop = false;
             self.pending_retry_steps = 0;
             self.audio_started = false;
-            self.direct_audio_retry_steps = 0;
-            self.direct_audio_retry_next = false;
             self.discharge_steps = 0;
 
             match mode {
@@ -386,9 +398,7 @@ where
                 LampMode::On => {
                     set_relay(false);
                     self.df_player.set_volume(DFPLAYER_VOLUME);
-                    self.df_player.play_track(START_TRACK);
-                    self.direct_audio_retry_steps = DFPLAYER_DIRECT_RETRY_STEPS;
-                    self.direct_audio_retry_next = true;
+                    self.df_player.play_configured_track(START_TRACK);
                 }
             }
             self.current_mode = mode;
@@ -427,7 +437,10 @@ where
                     self.played_run_loop = true;
                     self.sound_steps = 0;
                     self.df_player.set_volume(DFPLAYER_VOLUME);
-                    self.df_player.loop_track(RUN_TRACK);
+                    self.df_player.play_configured_track(RUN_TRACK);
+                } else if self.played_run_loop && self.sound_steps >= RUN_TRACK_REPEAT_STEPS {
+                    self.sound_steps = 0;
+                    self.df_player.play_configured_track(RUN_TRACK);
                 }
             }
         }
@@ -435,11 +448,10 @@ where
 
     fn play_failed_start_track_now(&mut self) {
         let track = self.next_failed_track();
-        self.failed_track_duration_steps = failed_track_duration_steps(track);
+        self.failed_track_duration_steps =
+            failed_track_duration_steps(track).saturating_add(self.next_u8() as u16);
         self.df_player.set_volume(DFPLAYER_VOLUME);
-        self.df_player.play_track(track);
-        self.direct_audio_retry_steps = DFPLAYER_DIRECT_RETRY_STEPS;
-        self.direct_audio_retry_next = true;
+        self.df_player.play_configured_track(track);
     }
 
     fn update_audio_queue(&mut self) {
@@ -460,15 +472,6 @@ where
             return;
         }
 
-        if self.direct_audio_retry_steps > 0 {
-            self.direct_audio_retry_steps -= 1;
-            if self.direct_audio_retry_steps == 0 && self.direct_audio_retry_next {
-                self.direct_audio_retry_next = false;
-                self.df_player.next_track();
-                return;
-            }
-        }
-
         if self.pending_track == 0 {
             return;
         }
@@ -479,9 +482,9 @@ where
         }
 
         if self.pending_loop {
-            self.df_player.loop_track(self.pending_track);
+            self.df_player.play_configured_track(self.pending_track);
         } else if DFPLAYER_USE_MP3_FOLDER {
-            self.df_player.play_mp3_folder_track(DFPLAYER_MP3_FOLDER, self.pending_track);
+            self.df_player.play_mp3_folder_track(self.pending_track);
         } else {
             self.df_player.play_track(self.pending_track);
         }
@@ -724,12 +727,8 @@ fn next_rng(value: u32) -> u32 {
 }
 
 fn failed_track_duration_steps(track: u8) -> u16 {
-    match track {
-        2 => 1_060,
-        3 => 3_300,
-        4 => 420,
-        _ => 900,
-    }
+    let track_offset = (track.saturating_sub(FAILED_START_MIN_TRACK) as u16) * 70;
+    FAILED_TRACK_MIN_STEPS + track_offset + (track as u16 % 2) * FAILED_TRACK_RANDOM_STEPS / 2
 }
 
 fn warm_white(value: u8) -> [u8; 3] {
@@ -844,15 +843,13 @@ fn main() -> ! {
     }
 
     let serial: DfSerial = Serial::usart1(dp.USART1, (tx_pin, rx_pin), 9_600.bps(), &mut rcc);
-    let mut watchdog = Watchdog::new(dp.IWDG);
-    watchdog.start(Hertz(1));
 
     if DIAGNOSTIC_DFPLAYER_TEST {
         let mut ws_a = Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL);
         let blank = [[0u8; 3]; LED_COUNT];
         let mut df_player = DfPlayer::new(serial);
+        let mut watchdog = Watchdog::new(dp.IWDG);
         let mut heartbeat = false;
-        let mut track = 1u8;
 
         for _ in 0..4 {
             heartbeat = !heartbeat;
@@ -861,38 +858,66 @@ fn main() -> ! {
             cortex_m::asm::delay(4_000_000);
         }
 
-        df_player.init();
-        cortex_m::asm::delay(48_000_000);
+        if DIAGNOSTIC_UART_PATTERN_TEST {
+            watchdog.start(Hertz(1));
+
+            loop {
+                heartbeat = !heartbeat;
+                gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
+                ws_a.write_frame(&blank);
+
+                for _ in 0..64 {
+                    df_player.write_uart_pattern();
+                }
+
+                watchdog.feed();
+                cortex_m::asm::delay(500_000);
+            }
+        }
+
         df_player.reset_module();
         cortex_m::asm::delay(96_000_000);
-        df_player.set_volume(DFPLAYER_VOLUME);
+        df_player.select_tf_card();
         cortex_m::asm::delay(8_000_000);
+        df_player.set_volume(30);
+        cortex_m::asm::delay(8_000_000);
+        watchdog.start(Hertz(1));
 
         loop {
             heartbeat = !heartbeat;
             gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
 
-            if DFPLAYER_USE_MP3_FOLDER {
-                df_player.play_mp3_folder_track(DFPLAYER_MP3_FOLDER, track);
-            } else {
-                df_player.play_track(track);
-            }
+            df_player.set_volume(30);
+            df_player.play_track(1);
 
-            track = if track >= 5 { 1 } else { track + 1 };
-
-            for _ in 0..DFPLAYER_TRACK_SECONDS {
+            for _ in 0..80 {
                 heartbeat = !heartbeat;
                 gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-                cortex_m::asm::delay(48_000_000);
+                ws_a.write_frame(&blank);
+                watchdog.feed();
+                cortex_m::asm::delay(1_000_000);
             }
         }
     }
+
+    let mut df_player = DfPlayer::new(serial);
+    cortex_m::asm::delay(96_000_000);
+    df_player.reset_module();
+    cortex_m::asm::delay(96_000_000);
+    df_player.select_tf_card();
+    cortex_m::asm::delay(8_000_000);
+    df_player.set_volume(DFPLAYER_VOLUME);
+    cortex_m::asm::delay(8_000_000);
+    df_player.stop();
+
+    let mut watchdog = Watchdog::new(dp.IWDG);
+    watchdog.start(Hertz(1));
 
     let mut lamp = LampSystem::new(
         a0,
         a1,
         Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL),
-        DfPlayer::new(serial),
+        df_player,
     );
 
     lamp.df_player.init();
