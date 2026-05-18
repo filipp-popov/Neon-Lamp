@@ -1,0 +1,22 @@
+[package]
+name = "neon_lamp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+embedded-hal = "0.2"
+nb = "1.0"
+stm32f0xx-hal = { version = "0.18.0", features = ["stm32f030x4", "rt"] }
+
+[profile.dev]
+opt-level = 3
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+overflow-checks = false

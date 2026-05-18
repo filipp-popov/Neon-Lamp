@@ -1,0 +1,1 @@
+Ws2815<stm32f0xx_hal::gpio::gpioa::PA7<Output<PushPull>>>: cortex_m::prelude::_embedded_hal_digital_OutputPin

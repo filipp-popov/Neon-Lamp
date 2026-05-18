@@ -1,0 +1,3 @@
+cargo:rustc-link-search=C:\Users\phili\OneDrive\Dev\Biohazard\Neon-Lamp\target\thumbv6m-none-eabi\debug\build\stm32f0-5f6df73deeddf52d\out
+cargo:rerun-if-changed=src/stm32f0x0/device.x
+cargo:rerun-if-changed=build.rs

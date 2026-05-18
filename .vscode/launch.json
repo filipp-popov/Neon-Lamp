@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "name": "Debug STM32F030F4",
+      "cwd": "${workspaceFolder}",
+      "chip": "STM32F030F4",
+      "protocol": "swd",
+      "speed": 100,
+      "connectUnderReset": false,
+      "flashingConfig": {
+        "flashingEnabled": true,
+        "haltAfterReset": true
+      },
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/neon_lamp"
+        }
+      ],
+      "preLaunchTask": "cargo: build"
+    }
+  ]
+}

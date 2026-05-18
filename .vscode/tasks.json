@@ -1,0 +1,111 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo: build",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build"
+      ],
+      "group": "build",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo: build release",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build",
+        "--release"
+      ],
+      "group": "build",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "probe-rs: list probes",
+      "type": "shell",
+      "command": "probe-rs",
+      "args": [
+        "list"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "probe-rs: soft reset",
+      "type": "shell",
+      "command": "probe-rs",
+      "args": [
+        "reset",
+        "--chip",
+        "STM32F030F4",
+        "--protocol",
+        "swd",
+        "--speed",
+        "100"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "probe-rs: flash debug",
+      "type": "shell",
+      "command": "probe-rs",
+      "args": [
+        "download",
+        "--chip",
+        "STM32F030F4",
+        "--protocol",
+        "swd",
+        "--speed",
+        "100",
+        "--chip-erase",
+        "--verify",
+        "${workspaceFolder}/target/thumbv6m-none-eabi/debug/neon_lamp"
+      ],
+      "dependsOn": [
+        "cargo: build"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "probe-rs: flash release",
+      "type": "shell",
+      "command": "probe-rs",
+      "args": [
+        "download",
+        "--chip",
+        "STM32F030F4",
+        "--protocol",
+        "swd",
+        "--speed",
+        "100",
+        "--chip-erase",
+        "--verify",
+        "${workspaceFolder}/target/thumbv6m-none-eabi/release/neon_lamp"
+      ],
+      "dependsOn": [
+        "cargo: build release"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "cargo: run flash/debug",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
+    }
+  ]
+}

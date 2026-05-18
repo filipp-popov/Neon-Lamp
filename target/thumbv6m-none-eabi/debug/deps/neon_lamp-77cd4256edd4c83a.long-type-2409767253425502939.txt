@@ -1,0 +1,1 @@
+LampSystem<stm32f0xx_hal::gpio::gpioa::PA6<Output<PushPull>>, Ws2815<stm32f0xx_hal::gpio::gpioa::PA7<Output<PushPull>>>, Serial<stm32f0xx_hal::pac::USART1, stm32f0xx_hal::gpio::gpioa::PA9<Alternate<stm32f0xx_hal::gpio::AF1>>, stm32f0xx_hal::gpio::gpioa::PA10<Alternate<stm32f0xx_hal::gpio::AF1>>>>
