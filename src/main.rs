@@ -23,22 +23,12 @@ const WS_RESET_DELAY: u32 = 500_000;
 const WS_T0L: u32 = 10;
 const WS_T1H: u32 = 10;
 const WS_T1L: u32 = 0;
-const DIAGNOSTIC_STATIC_TEST: bool = false;
-const DIAGNOSTIC_GPIO_TEST: bool = false;
-const DIAGNOSTIC_OFF_FRAME_TEST: bool = false;
-const DIAGNOSTIC_SCOPE_PATTERN_TEST: bool = false;
-const DIAGNOSTIC_DFPLAYER_TEST: bool = false;
-const DIAGNOSTIC_UART_PATTERN_TEST: bool = false;
-const DIAGNOSTIC_INVERT_WS_SIGNAL: bool = false;
+const STRIP_B_DELAY_FRAMES: usize = 7;
 const HEARTBEAT_PIN: u8 = 4;
-const HEARTBEAT_TOGGLE_FRAMES: u8 = 64;
-const SCOPE_PATTERN_BYTES: usize = 64;
+const HEARTBEAT_TOGGLE_FRAMES: u8 = 4;
 const GPIOA_BSRR: *mut u32 = 0x4800_0018 as *mut u32;
 const RELAY_PIN: u8 = 7;
-const TEST_BRIGHTNESS: u8 = 64;
-const DFPLAYER_TRACK_SECONDS: u8 = 20;
 const DFPLAYER_USE_MP3_FOLDER: bool = true;
-const DFPLAYER_ENABLED: bool = true;
 const START_TRACK: u8 = 1;
 const FAILED_START_MIN_TRACK: u8 = 2;
 const FAILED_START_TRACKS: u8 = 3;
@@ -75,16 +65,14 @@ enum LampMode {
 struct Ws2815 {
     set_mask: u32,
     clear_mask: u32,
-    inverted: bool,
 }
 
 impl Ws2815 {
-    fn new(pin_number: u8, inverted: bool) -> Self {
+    fn new(pin_number: u8) -> Self {
         let bit = 1u32 << pin_number;
         Self {
             set_mask: bit,
             clear_mask: bit << 16,
-            inverted,
         }
     }
 
@@ -103,20 +91,12 @@ impl Ws2815 {
 
     #[inline(always)]
     fn set_high(&self) {
-        if self.inverted {
-            self.write_mask(self.clear_mask);
-        } else {
-            self.write_mask(self.set_mask);
-        }
+        self.write_mask(self.set_mask);
     }
 
     #[inline(always)]
     fn set_low(&self) {
-        if self.inverted {
-            self.write_mask(self.set_mask);
-        } else {
-            self.write_mask(self.clear_mask);
-        }
+        self.write_mask(self.clear_mask);
     }
 
     #[inline(always)]
@@ -148,17 +128,11 @@ impl Ws2815 {
     fn write_frame(&mut self, colors: &[[u8; 3]; LED_COUNT]) {
         self.send_reset();
         for color in colors {
-            self.write_byte(color[0]);
             self.write_byte(color[1]);
+            self.write_byte(color[0]);
             self.write_byte(color[2]);
         }
         self.send_reset();
-    }
-
-    fn write_repeated_byte(&mut self, byte: u8, count: usize) {
-        for _ in 0..count {
-            self.write_byte(byte);
-        }
     }
 }
 
@@ -177,13 +151,7 @@ where
         DfPlayer { tx }
     }
 
-    fn init(&mut self) {}
-
     fn send_command(&mut self, command: u8, param: u16) {
-        if !DFPLAYER_ENABLED {
-            return;
-        }
-
         let mut packet = [0u8; 10];
         packet[0] = 0x7E;
         packet[1] = 0xFF;
@@ -217,12 +185,6 @@ where
         }
     }
 
-    fn write_uart_pattern(&mut self) {
-        self.write_byte_timeout(0x55);
-        self.write_byte_timeout(0x00);
-        self.write_byte_timeout(0xff);
-    }
-
     fn play_track(&mut self, track: u8) {
         self.send_command(0x03, track as u16);
     }
@@ -237,10 +199,6 @@ where
 
     fn play_mp3_folder_track(&mut self, track: u8) {
         self.send_command(0x12, track as u16);
-    }
-
-    fn loop_track(&mut self, track: u8) {
-        self.send_command(0x08, track as u16);
     }
 
     fn select_tf_card(&mut self) {
@@ -272,6 +230,7 @@ where
     a0: ModePin,
     a1: NoisePin,
     ws_a: Ws2815,
+    ws_b: Ws2815,
     df_player: DfPlayer<TX>,
     current_mode: LampMode,
     animation_index: usize,
@@ -296,6 +255,9 @@ where
     discharge_side_mode: u8,
     discharge_intensity: u8,
     frame_a: [[u8; 3]; LED_COUNT],
+    frame_b: [[u8; 3]; LED_COUNT],
+    frame_b_history: [[[u8; 3]; LED_COUNT]; STRIP_B_DELAY_FRAMES],
+    frame_b_history_index: usize,
 }
 
 impl<TX> LampSystem<TX>
@@ -306,12 +268,14 @@ where
         a0: ModePin,
         a1: NoisePin,
         ws_a: Ws2815,
+        ws_b: Ws2815,
         df_player: DfPlayer<TX>,
     ) -> Self {
         Self {
             a0,
             a1,
             ws_a,
+            ws_b,
             df_player,
             current_mode: LampMode::Off,
             animation_index: 0,
@@ -336,6 +300,9 @@ where
             discharge_side_mode: 0,
             discharge_intensity: 0,
             frame_a: [[0; 3]; LED_COUNT],
+            frame_b: [[0; 3]; LED_COUNT],
+            frame_b_history: [[[0; 3]; LED_COUNT]; STRIP_B_DELAY_FRAMES],
+            frame_b_history_index: 0,
         }
     }
 
@@ -352,26 +319,6 @@ where
 
     fn step(&mut self) {
         self.tick_heartbeat();
-
-        if DIAGNOSTIC_SCOPE_PATTERN_TEST {
-            self.ws_a.write_repeated_byte(0x00, SCOPE_PATTERN_BYTES);
-            cortex_m::asm::delay(UPDATE_DELAY);
-            return;
-        }
-
-        if DIAGNOSTIC_OFF_FRAME_TEST {
-            self.clear();
-            self.ws_a.write_frame(&self.frame_a);
-            cortex_m::asm::delay(UPDATE_DELAY);
-            return;
-        }
-
-        if DIAGNOSTIC_STATIC_TEST {
-            self.render_diagnostic_static_test();
-            self.ws_a.write_frame(&self.frame_a);
-            cortex_m::asm::delay(UPDATE_DELAY);
-            return;
-        }
 
         let mode = self.read_mode();
 
@@ -410,14 +357,18 @@ where
             LampMode::On => self.render_on(),
         }
 
+        self.render_strip_b_delayed();
         self.update_sound();
         self.update_audio_queue();
         self.ws_a.write_frame(&self.frame_a);
+        self.ws_b.write_frame(&self.frame_b);
         cortex_m::asm::delay(UPDATE_DELAY);
     }
 
     fn clear(&mut self) {
         self.frame_a = [[0; 3]; LED_COUNT];
+        self.frame_b = [[0; 3]; LED_COUNT];
+        self.frame_b_history = [[[0; 3]; LED_COUNT]; STRIP_B_DELAY_FRAMES];
     }
 
     fn update_sound(&mut self) {
@@ -519,12 +470,6 @@ where
         gpioa_write_pin(HEARTBEAT_PIN, self.heartbeat_high);
     }
 
-    fn render_diagnostic_static_test(&mut self) {
-        for led in self.frame_a.iter_mut() {
-            *led = [12, 0, 0];
-        }
-    }
-
     fn render_starting(&mut self) {
         self.fade(34);
         self.keep_center_dim();
@@ -595,6 +540,13 @@ where
             let pos = self.next_index();
             self.add_glow(pos, warm_white(150), 5);
         }
+    }
+
+    fn render_strip_b_delayed(&mut self) {
+        let delayed = self.frame_b_history[self.frame_b_history_index];
+        self.frame_b_history[self.frame_b_history_index] = self.frame_a;
+        self.frame_b_history_index = (self.frame_b_history_index + 1) % STRIP_B_DELAY_FRAMES;
+        self.frame_b = delayed;
     }
 
     fn fade(&mut self, amount: u8) {
@@ -772,12 +724,13 @@ fn main() -> ! {
 
     let gpioa = dp.GPIOA.split(&mut rcc);
 
-    let (a0, a1, _heartbeat_pin, _ws_a_pin, _ws_b_pin, tx_pin, rx_pin) = free(|cs| {
+    let (a0, a1, _heartbeat_pin, _ws_a_pin, _ws_b_pin, _relay_pin, tx_pin, rx_pin) = free(|cs| {
         (
             gpioa.pa0.into_pull_up_input(cs),
             gpioa.pa1.into_pull_up_input(cs),
             gpioa.pa4.into_push_pull_output_hs(cs),
             gpioa.pa6.into_push_pull_output_hs(cs),
+            gpioa.pa5.into_push_pull_output_hs(cs),
             gpioa.pa7.into_push_pull_output_hs(cs),
             gpioa.pa9.into_alternate_af1(cs),
             gpioa.pa10.into_alternate_af1(cs),
@@ -786,119 +739,7 @@ fn main() -> ! {
     gpioa_write_pin(HEARTBEAT_PIN, false);
     set_relay(false);
 
-    if DIAGNOSTIC_GPIO_TEST {
-        let mut high = false;
-        gpioa_write_pin(6, false);
-        gpioa_write_pin(7, false);
-
-        loop {
-            high = !high;
-            gpioa_write_pin(4, high);
-            cortex_m::asm::delay(8_000_000);
-        }
-    }
-
-    if DIAGNOSTIC_OFF_FRAME_TEST {
-        let mut ws_a = Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL);
-        let frame = [[0u8; 3]; LED_COUNT];
-        let mut heartbeat = false;
-
-        gpioa_write_pin(6, false);
-        gpioa_write_pin(7, false);
-        cortex_m::asm::delay(8_000_000);
-
-        loop {
-            heartbeat = !heartbeat;
-            gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-            ws_a.write_frame(&frame);
-            gpioa_write_pin(6, false);
-            gpioa_write_pin(7, false);
-            cortex_m::asm::delay(8_000_000);
-        }
-    }
-
-    if DIAGNOSTIC_SCOPE_PATTERN_TEST {
-        let mut ws_a = Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL);
-        let mut heartbeat = false;
-
-        loop {
-            heartbeat = !heartbeat;
-            gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-            ws_a.write_repeated_byte(0x00, SCOPE_PATTERN_BYTES);
-            cortex_m::asm::delay(2_000_000);
-        }
-    }
-
-    if DIAGNOSTIC_STATIC_TEST {
-        let mut ws_a = Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL);
-        let frame_a = [[TEST_BRIGHTNESS, 0, 0]; LED_COUNT];
-        let mut heartbeat = false;
-
-        loop {
-            heartbeat = !heartbeat;
-            gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-            ws_a.write_frame(&frame_a);
-            cortex_m::asm::delay(2_000_000);
-        }
-    }
-
     let serial: DfSerial = Serial::usart1(dp.USART1, (tx_pin, rx_pin), 9_600.bps(), &mut rcc);
-
-    if DIAGNOSTIC_DFPLAYER_TEST {
-        let mut ws_a = Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL);
-        let blank = [[0u8; 3]; LED_COUNT];
-        let mut df_player = DfPlayer::new(serial);
-        let mut watchdog = Watchdog::new(dp.IWDG);
-        let mut heartbeat = false;
-
-        for _ in 0..4 {
-            heartbeat = !heartbeat;
-            gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-            ws_a.write_frame(&blank);
-            cortex_m::asm::delay(4_000_000);
-        }
-
-        if DIAGNOSTIC_UART_PATTERN_TEST {
-            watchdog.start(Hertz(1));
-
-            loop {
-                heartbeat = !heartbeat;
-                gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-                ws_a.write_frame(&blank);
-
-                for _ in 0..64 {
-                    df_player.write_uart_pattern();
-                }
-
-                watchdog.feed();
-                cortex_m::asm::delay(500_000);
-            }
-        }
-
-        df_player.reset_module();
-        cortex_m::asm::delay(96_000_000);
-        df_player.select_tf_card();
-        cortex_m::asm::delay(8_000_000);
-        df_player.set_volume(30);
-        cortex_m::asm::delay(8_000_000);
-        watchdog.start(Hertz(1));
-
-        loop {
-            heartbeat = !heartbeat;
-            gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-
-            df_player.set_volume(30);
-            df_player.play_track(1);
-
-            for _ in 0..80 {
-                heartbeat = !heartbeat;
-                gpioa_write_pin(HEARTBEAT_PIN, heartbeat);
-                ws_a.write_frame(&blank);
-                watchdog.feed();
-                cortex_m::asm::delay(1_000_000);
-            }
-        }
-    }
 
     let mut df_player = DfPlayer::new(serial);
     cortex_m::asm::delay(96_000_000);
@@ -916,11 +757,10 @@ fn main() -> ! {
     let mut lamp = LampSystem::new(
         a0,
         a1,
-        Ws2815::new(6, DIAGNOSTIC_INVERT_WS_SIGNAL),
+        Ws2815::new(6),
+        Ws2815::new(5),
         df_player,
     );
-
-    lamp.df_player.init();
 
     loop {
         lamp.step();
