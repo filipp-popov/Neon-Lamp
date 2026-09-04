@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $serial = "003B002B3331511134333834"
 $port = 61234
+$maxServerStarts = 3
 $server = "C:\ST\STM32CubeIDE_1.14.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.1.100.202310302101\tools\bin\ST-LINK_gdbserver.exe"
 $gdb = "C:\ST\STM32CubeIDE_1.14.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.11.3.rel1.win32_1.1.100.202309141235\tools\bin\arm-none-eabi-gdb.exe"
 $cubeProgrammerBin = "C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin"
@@ -30,46 +31,66 @@ set confirm off
 target extended-remote localhost:$port
 monitor reset
 load
+compare-sections
 monitor reset
 detach
 quit
 "@ | Set-Content -LiteralPath $gdbScript -Encoding ASCII
 
-$serverArgs = "-e -p $port -d -i $serial --frequency 100 -cp `"$cubeProgrammerBin`" -f `"$serverLog`" -l 31"
+$flashed = $false
 
-$serverProcess = Start-Process -FilePath $server -ArgumentList $serverArgs -WindowStyle Hidden -PassThru
+for ($attempt = 1; $attempt -le $maxServerStarts -and -not $flashed; $attempt++) {
+    $serverLog = Join-Path $tempDir "stlink-gdbserver-$attempt.log"
+    $serverArgs = "-e -s -p $port -d -i $serial --frequency 100 -cp `"$cubeProgrammerBin`" -f `"$serverLog`" -l 31"
+    $serverProcess = Start-Process -FilePath $server -ArgumentList $serverArgs -WindowStyle Hidden -PassThru
 
-try {
     $deadline = (Get-Date).AddSeconds(10)
-    do {
-        Start-Sleep -Milliseconds 250
-        $client = New-Object Net.Sockets.TcpClient
-        try {
-            $connect = $client.BeginConnect("127.0.0.1", $port, $null, $null)
-            if ($connect.AsyncWaitHandle.WaitOne(200)) {
-                $client.EndConnect($connect)
+    $serverReady = $false
+
+    try {
+        while ((Get-Date) -lt $deadline -and -not $serverReady) {
+            Start-Sleep -Milliseconds 250
+            $client = New-Object Net.Sockets.TcpClient
+            try {
+                $connect = $client.BeginConnect("127.0.0.1", $port, $null, $null)
+                if ($connect.AsyncWaitHandle.WaitOne(200)) {
+                    $client.EndConnect($connect)
+                    $serverReady = $true
+                }
+            } catch {
+            } finally {
+                $client.Close()
+            }
+
+            if ($serverProcess.HasExited) {
                 break
             }
-        } catch {
-        } finally {
-            $client.Close()
         }
 
-        if ($serverProcess.HasExited) {
-            throw "ST-LINK_gdbserver exited early. See $serverLog"
+        if (-not $serverReady) {
+            if ($attempt -lt $maxServerStarts) {
+                Write-Host "ST-LINK_gdbserver did not start on attempt $attempt; retrying..."
+                Start-Sleep -Seconds 1
+                continue
+            }
+
+            throw "ST-LINK_gdbserver did not start after $maxServerStarts attempts. See $serverLog"
         }
-    } while ((Get-Date) -lt $deadline)
 
-    if ((Get-Date) -ge $deadline) {
-        throw "Timed out waiting for ST-LINK_gdbserver on port $port. See $serverLog"
-    }
+        & $gdb -q -batch -x $gdbScript $ElfPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "arm-none-eabi-gdb failed with exit code $LASTEXITCODE"
+        }
 
-    & $gdb -q -batch -x $gdbScript $ElfPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "arm-none-eabi-gdb failed with exit code $LASTEXITCODE"
+        $flashed = $true
+        Write-Host "Flash verified and target reset."
+    } finally {
+        if ($serverProcess -and -not $serverProcess.HasExited) {
+            Stop-Process -Id $serverProcess.Id -Force
+        }
     }
-} finally {
-    if ($serverProcess -and -not $serverProcess.HasExited) {
-        Stop-Process -Id $serverProcess.Id -Force
-    }
+}
+
+if (-not $flashed) {
+    exit 1
 }
